@@ -75,7 +75,7 @@ df = df[df["Equipe"].notna()]
 
 # Lista de equipes
 equipes = sorted(df["Equipe"].dropna().unique().tolist())
-intervalo_segundos = 15  # tempo entre troca de equipes
+intervalo_segundos = 60  # tempo entre troca de equipes
 
 # Inicializa estados da sessão
 if "equipe_index" not in st.session_state:
@@ -144,7 +144,6 @@ col_graf1, col_graf2, col_graf3 = st.columns(3)
 
 # --- 1. Gráfico 1: Atividades por Tipo e Status ---
 with col_graf1:
-    st.subheader("Volume de Atividades por Tipo e Status")
     df_status = df_equipe.groupby(['Atividade', 'Status']).size().reset_index(name='Quantidade')
     fig1 = px.bar(df_status, x='Quantidade', y='Atividade', color='Status', orientation='h', title='Distribuição de Atividades por Status',
                     category_orders={"Atividade": df_status.groupby('Atividade')['Quantidade'].sum().sort_values(ascending=True).index},
@@ -157,7 +156,6 @@ with col_graf1:
 
 # --- 2. Gráfico 2: Operadores × Atividades Atrasadas ---
 with col_graf2:
-    st.subheader("Operadores com Atividades em Atraso")
     df_op_atraso = df_equipe[df_equipe['Status'] == 'Atrasada']['Operador'].value_counts().reset_index().sort_values('count', ascending=False)
     
     if not df_op_atraso.empty:
