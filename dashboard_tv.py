@@ -160,7 +160,7 @@ with col_graf3:
         contagem_agrupada = contagem_clientes.copy()
         contagem_agrupada['Cliente'] = contagem_agrupada.apply(lambda row: row['Cliente'] if row['Quantidade'] >= limite else 'Outros', axis=1)
         df_final = contagem_agrupada.groupby('Cliente')['Quantidade'].sum().reset_index()
-        fig3 = px.pie(df_final, names='Cliente', values='Quantidade', hole=0.4)
+        fig3 = px.pie(df_final, names='Cliente', values='Quantidade')
         fig3.update_layout(showlegend=False)
         fig3.update_traces(textposition='inside', textinfo='percent+label', insidetextorientation='radial')
         st.plotly_chart(fig3, use_container_width=True)
