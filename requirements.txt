@@ -4,3 +4,4 @@ plotly
 requests
 streamlit-plotly-events
 streamlit-autorefresh
+python-docx
