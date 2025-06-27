@@ -1,170 +1,257 @@
-import pandas as pd
 import streamlit as st
-import plotly.express as px
-import requests
+import pandas as pd
+import plotly.graph_objects as go
+from auth import get_access_token
+from data import get_processed_dataframe
+from utils import CORES_EQUIPES, MESES_EM_PORTUGUES, get_cor_desempenho
 import time
-import datetime
+import streamlit.components.v1 as components
 
-# --- CONFIGURAÇÕES E SEGURANÇA ---
-SITE_ID = "maqfiltros3.sharepoint.com,68b563be-e515-4193-9b5b-4dcf121342e8,347a1963-1db4-4613-8841-056a68baf7ec"
-LIST_ID = "418a9527-5b59-432e-8d95-bad94ef6aed1"
-
-ACCESS_TOKEN = st.secrets["SHAREPOINT_TOKEN"]
-
-HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
+# Configuração inicial
 st.set_page_config(layout='wide')
 
-# --- FUNÇÕES DE DADOS COM CACHE ---
-
-@st.cache_data(ttl=600) # Cache da requisição por 10 minutos
-def fetch_sharepoint_data(_site_id, _list_id):
-    """Apenas busca os dados brutos da API."""
-    url = f"https://graph.microsoft.com/v1.0/sites/{_site_id}/lists/{_list_id}/items?expand=fields&$top=999"
-    try:
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status() # Lança um erro para status 4xx/5xx
-        data = response.json()
-        return [item["fields"] for item in data["value"]]
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erro ao conectar com a API do SharePoint: {e}")
-        return None
-
-@st.cache_data(ttl=600) # Cache do processamento também
-def get_processed_dataframe():
-    """Busca e processa todos os dados, retornando um DataFrame limpo."""
-    items = fetch_sharepoint_data(SITE_ID, LIST_ID)
-    if items is None:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(items)
-
-    FIELD_MAPPING = {
-        "field_2": "Atividade", "field_3": "Cliente", "field_5": "Data de Emissão",
-        "field_6": "Data de Início", "field_7": "Data de Término", "field_8": "Data Final",
-        "field_9": "Data Início", "field_10": "Descrição da Atividade", "field_12": "Emissor",
-        "field_16": "Nº Nota Fiscal", "field_17": "Qtd. Bombonas", "field_19": "Operador",
-        "Equipe": "Equipe"
-    }
-    df = df.rename(columns=FIELD_MAPPING)
-
-    for col in ["Data de Emissão", "Data de Início", "Data Final", "Data de Término"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.tz_localize(None)
-
-    colaborador_para_equipe = {
-        "Daniela": "Comercial", "Gilmar Couto": "Operação - Litoral Norte",
-        "Edvalda Cerqueira": "Administrativo / Financeiro", "Icaro Conceição": "Operação - Salvador",
-        "Moises de Jesus": "Operação - Salvador", "Vinicius Silva": "Operação - Salvador",
-        "Jerri Oliveira": "Operação - Litoral Norte", "Adriano": "Operação - Industrial",
-        "Paulo Cesar": "Administrativo / Financeiro", "Fábio Barreto": "Operação - Salvador",
-        "Henrique Califano": "Técnico", "Anderson Dias": "Operação - Litoral Norte",
-        "Moisés de Jesus": "Operação - Salvador", "Matheus Gusmão": "Operação - Salvador",
-        "Diogo Bacelar": "Técnico", "Judson Cruz": "Operação - Salvador"
-    }
-    df["Equipe"] = df["Operador"].map(colaborador_para_equipe)
-    df = df[df["Equipe"].notna()]
-    
-    hoje = pd.Timestamp.now().date()
-    def definir_status_correto(row):
-        if pd.notna(row['Data de Término']): return 'Concluída'
-        if pd.notna(row['Data Final']):
-            if row['Data Final'].date() < hoje: return 'Atrasada'
-            else: return 'No Prazo'
-        else: return 'Sem Vencimento'
-    
-    df['Status'] = df.apply(definir_status_correto, axis=1)
-    
-    return df
-
-# --- LÓGICA PRINCIPAL DO APP ---
-df_completo = get_processed_dataframe()
+# Dados
+access_token = get_access_token()
+df_completo = get_processed_dataframe(access_token)
 
 if df_completo.empty:
-    st.warning("Não foi possível carregar os dados. Verifique a conexão ou o token de acesso.")
+    st.warning("Nenhum dado disponível para exibição.")
     st.stop()
 
-# Lógica do Carrossel de Equipes
-equipes = sorted(df_completo["Equipe"].dropna().unique().tolist())
+# Cores definidas para os status
+CORES_STATUS = {
+    "Concluída": "#00CC96",
+    "No Prazo": "#D3D3D3",
+    "Próximo do Vencimento": "#FFD700",
+    "Atrasada": "#EF553B"
+}
+
+# Filtro Principal
+hoje = pd.Timestamp.now().date()
+df_filtrado = df_completo[(df_completo['Data Final'].dt.month == hoje.month) & (df_completo['Data Final'].dt.year == hoje.year) | (df_completo['Status'] == 'Atrasada')]
+
+# Carrossel automático
+equipes = ['Visão Geral'] + sorted(df_filtrado['Equipe'].unique())
 intervalo_segundos = 15
 
-if "equipe_index" not in st.session_state: st.session_state.equipe_index = 0
-if "ultimo_update" not in st.session_state: st.session_state.ultimo_update = time.time()
+if 'index_equipe' not in st.session_state:
+    st.session_state.index_equipe = 0
+    st.session_state.ultimo_update = time.time()
 
 if time.time() - st.session_state.ultimo_update > intervalo_segundos:
-    st.session_state.equipe_index = (st.session_state.equipe_index + 1) % len(equipes)
+    st.session_state.index_equipe = (st.session_state.index_equipe + 1) % len(equipes)
     st.session_state.ultimo_update = time.time()
     st.rerun()
 
-# --- EXIBIÇÃO DO DASHBOARD ---
-equipe_atual = equipes[st.session_state.equipe_index]
-df_equipe = df_completo[df_completo["Equipe"] == equipe_atual].copy()
-equipe_proxima = equipes[(st.session_state.equipe_index + 1) % len(equipes)]
+equipe_atual = equipes[st.session_state.index_equipe]
+equipe_proxima = equipes[(st.session_state.index_equipe + 1) % len(equipes)]
+titulo_equipe = equipe_atual
 
-# Cálculos dos KPIs
-total_abertas = df_equipe[df_equipe['Status'] != 'Concluída'].shape[0]
-atividades_atrasadas = df_equipe[df_equipe['Status'] == 'Atrasada'].shape[0]
-taxa_atraso = (atividades_atrasadas / total_abertas) * 100 if total_abertas > 0 else 0
-atividades_no_prazo = df_equipe[df_equipe['Status'] == 'No Prazo'].shape[0]
+# Cálculo de KPIs
+total_exibido = len(df_filtrado[df_filtrado['Equipe'] == equipe_atual]) if equipe_atual != 'Visão Geral' else len(df_filtrado)
+atividades_concluidas = len(df_filtrado[(df_filtrado['Status'] == 'Concluída') & ((df_filtrado['Equipe'] == equipe_atual) | (equipe_atual == 'Visão Geral'))])
+atividades_no_prazo = len(df_filtrado[(df_filtrado['Status'] == 'No Prazo') & ((df_filtrado['Equipe'] == equipe_atual) | (equipe_atual == 'Visão Geral'))])
 
-# --- CABEÇALHO COMPACTO: Título e KPIs na mesma linha ---
-col_header, colequipe, col_kpi1, col_kpi2, col_kpi3 = st.columns([4, 4, 1, 1, 1])
-with col_header:
-    st.header("Gestão à Vista: Atividades")
-    
-with colequipe:
-    st.subheader(f"Equipe: {equipe_atual}")
+if total_exibido > 0:
+    taxa_desempenho = ((atividades_concluidas + atividades_no_prazo) / total_exibido) * 100
+else:
+    taxa_desempenho = 100.0
 
-with col_kpi1:
-    st.metric("Abertas", f"{total_abertas}")
-with col_kpi2:
-    st.metric("No Prazo", f"{atividades_no_prazo}")
-with col_kpi3:
-    st.metric("Taxa de Atraso", f"{taxa_atraso:.2f}%", delta=f"{atividades_atrasadas} Atrasadas", delta_color="inverse")
+numero_do_mes = hoje.month
+nome_do_mes = MESES_EM_PORTUGUES[numero_do_mes]
+ano_atual = hoje.year
 
-# Contador do carrossel
-tempo_restante = int(intervalo_segundos - (time.time() - st.session_state.ultimo_update))
-st.caption(f"⏳ Próxima equipe: **{equipe_proxima}** em **{tempo_restante}s**...")
+# Cabeçalho mais limpo e organizado
+col_equipe, col_desempenho, col_info = st.columns([4, 3, 3])
+
+with col_equipe:
+    cor_fundo = CORES_EQUIPES.get(equipe_atual, "#262730")
+    html_bloco_colorido = f"""
+    <div style="background-color:{cor_fundo}; padding:12px; border-radius:8px; text-align:center;">
+        <h2 style="color:white; margin:0;">{titulo_equipe}</h2>
+    </div>"""
+    st.markdown(html_bloco_colorido, unsafe_allow_html=True)
+
+with col_desempenho:
+    cor_desempenho = get_cor_desempenho(taxa_desempenho)
+    html_gauge = f"""<div style="background-color:{cor_desempenho}; padding:12px; border-radius:8px; text-align:center;">
+        <h2 style="color:white; margin:0;">Desempenho: {taxa_desempenho:.0f}%</h2>
+    </div>
+    """
+    st.markdown(html_gauge, unsafe_allow_html=True)
+
+with col_info:
+    st.caption(f"📅 **Período:** {nome_do_mes} de {ano_atual}")
+    st.caption(f"🔄 **Próxima equipe:** {equipe_proxima} em {int(intervalo_segundos - (time.time() - st.session_state.ultimo_update))} segundos")
+    st.caption(f"📌 **Equipe:** {st.session_state.index_equipe} / {len(equipes)}")
+
 st.divider()
 
+# Mantendo distribuição em 3 colunas
+if equipe_atual == 'Visão Geral':
+    col1, col2, col3 = st.columns(3)
 
-# Exibição dos Gráficos
-col_graf1, col_graf2, col_graf3 = st.columns(3)
+    with col1:
+        df_percentual = pd.crosstab(df_filtrado['Equipe'], df_filtrado['Status'], normalize='index') * 100
+        status_order = ['Concluída', 'Próximo do Vencimento', 'Atrasada']
+        fig1 = go.Figure()
+        for status in status_order:
+            pattern_shape = "/" if status == "Atrasada" else ""
+            fig1.add_trace(go.Bar(y=df_percentual.index, x=df_percentual[status], name=status, orientation='h', marker_color=CORES_STATUS[status], marker_pattern_shape=pattern_shape))
+        fig1.update_layout(title='Distribuição Percentual das Atividades por Equipe', barmode='stack', legend=dict(orientation="h", y=-0.5, x=0.5, xanchor='center'))
+        st.plotly_chart(fig1, use_container_width=True)
 
-with col_graf1:
-    st.subheader("Atividades por Tipo")
-    df_status = df_equipe.groupby(['Atividade', 'Status']).size().reset_index(name='Quantidade')
-    fig1 = px.bar(df_status, x='Quantidade', y='Atividade', color='Status', orientation='h',
-                  category_orders={"Atividade": df_status.groupby('Atividade')['Quantidade'].sum().sort_values(ascending=True).index},
-                  color_discrete_map={'Atrasada': '#EF553B', 'Concluída': '#00CC96', 'No Prazo': '#636EFA', 'Sem Vencimento': '#ABAAAA'}, height=450)
-    fig1.update_layout(yaxis_title=None, xaxis_title="Quantidade", showlegend=False, legend_title_text='')
-    st.plotly_chart(fig1, use_container_width=True)
-
-with col_graf2:
-    st.subheader("Operadores com Atrasos")
-    df_op_atraso = df_equipe[df_equipe['Status'] == 'Atrasada']['Operador'].value_counts().reset_index().sort_values('count', ascending=False)
-    if not df_op_atraso.empty:
-        fig2 = px.bar(df_op_atraso, x='Operador', y='count', color_discrete_sequence=['#EF553B'], height=450)
-        fig2.update_layout(xaxis_title=None, yaxis_title="Nº de Atividades Atrasadas")
+    with col2:
+        df_absoluto = pd.crosstab(df_filtrado['Equipe'], df_filtrado['Status'])
+        fig2 = go.Figure()
+        for status in status_order:
+            pattern_shape = "/" if status == "Atrasada" else ""
+            fig2.add_trace(go.Bar(x=df_absoluto.index, y=df_absoluto[status], name=status, marker_color=CORES_STATUS[status], marker_pattern_shape=pattern_shape))
+        fig2.update_layout(title='Número Absoluto das Atividades por Equipe', barmode='stack', legend=dict(orientation="h", y=-0.5, x=0.5, xanchor='center'))
         st.plotly_chart(fig2, use_container_width=True)
-    else:
-        st.success("🎉 Nenhum operador com atividades em atraso!")
 
-with col_graf3:
-    st.subheader("Clientes com Atividades Abertas")
-    df_abertas = df_equipe[df_equipe['Status'] != 'Concluída'].copy()
-    df_clientes = df_abertas.dropna(subset=['Cliente'])
-    if not df_clientes.empty:
-        contagem_clientes = df_clientes['Cliente'].value_counts().reset_index()
-        contagem_clientes.columns = ['Cliente', 'Quantidade']
-        limite = 3
-        contagem_agrupada = contagem_clientes.copy()
-        contagem_agrupada['Cliente'] = contagem_agrupada.apply(lambda row: row['Cliente'] if row['Quantidade'] >= limite else 'Outros', axis=1)
-        df_final = contagem_agrupada.groupby('Cliente')['Quantidade'].sum().reset_index()
-        fig3 = px.pie(df_final, names='Cliente', values='Quantidade')
-        fig3.update_layout(showlegend=False)
-        fig3.update_traces(textposition='inside', textinfo='percent+label', insidetextorientation='radial')
+    with col3:
+        st.subheader("Detalhamento por Cliente")
+        tabela_cliente = pd.crosstab(df_filtrado['Cliente'], df_filtrado['Status'])
+        st.dataframe(tabela_cliente)
+else:
+    cole1, cole2, cole3 = st.columns(3)
+
+    with cole1:
+        df_tipo_pct = pd.crosstab(
+        df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Atividade"],
+        df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Status"],
+        normalize="index"
+    ) * 100
+
+        status_esperados = ['Concluída', 'No Prazo', 'Próximo do Vencimento', 'Atrasada']
+        
+        for status in status_esperados:
+            if status not in df_tipo_pct.columns:
+                df_tipo_pct[status] = 0
+        df_tipo_pct = df_tipo_pct[status_esperados]  # Reordena
+
+        fig1 = go.Figure()
+        for status in status_esperados:
+            fig1.add_trace(go.Bar(
+                y=df_tipo_pct.index,
+                x=df_tipo_pct[status],
+                name=status,
+                orientation='h',
+                text=df_tipo_pct[status].apply(lambda x: f'{x:.0f}%' if x > 0 else ''),
+                textposition='auto',
+                marker_color=CORES_STATUS[status],
+                marker_pattern_shape='/' if status == 'Atrasada' else ''
+            ))
+
+        fig1.update_layout(
+            title='Tipo de Atividade por Status (%)',
+            barmode='stack',
+            legend=dict(orientation='h', y=-0.2, x=0.5, xanchor='center')
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+        df_colab_atividade = pd.crosstab(
+        df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Operador"],
+        df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Atividade"]
+        )
+
+        fig2 = go.Figure()
+        for atividade in df_colab_atividade.columns:
+            fig2.add_trace(go.Bar(
+                x=df_colab_atividade.index,
+                y=df_colab_atividade[atividade],
+                name=atividade,
+                text=df_colab_atividade[atividade],
+                textposition='auto',
+                orientation='v'
+            ))
+
+        fig2.update_layout(
+            title='Colaboradores x Tipo de Atividade',
+            barmode='stack',
+            legend=dict(orientation='h', y=-0.2, x=0.5, xanchor='center')
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+    with cole2:
+        df_operador_pct = pd.crosstab(
+            df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Operador"],
+            df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Status"],
+            normalize="index"
+        ) * 100
+
+        for status in status_esperados:
+            if status not in df_operador_pct.columns:
+                df_operador_pct[status] = 0
+        df_operador_pct = df_operador_pct[status_esperados]
+
+        fig3 = go.Figure()
+        for status in status_esperados:
+            fig3.add_trace(go.Bar(
+                y=df_operador_pct.index,
+                x=df_operador_pct[status],
+                name=status,
+                orientation='h',
+                text=df_operador_pct[status].apply(lambda x: f'{x:.0f}%' if x > 0 else ''),
+                textposition='inside',
+                marker_color=CORES_STATUS[status],
+                marker_pattern_shape='/' if status == 'Atrasada' else ''
+            ))
+
+        fig3.update_layout(
+            title='Operadores x Status das Atividades (%)',
+            barmode='stack',
+            legend=dict(orientation='h', y=-0.5, x=0.5, xanchor='center')
+        )
         st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.info("Nenhuma atividade em aberto para esta equipe.")
+
+        df_operador_abs = pd.crosstab(
+            df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Operador"],
+            df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Status"]
+        )
+
+        for status in status_esperados:
+            if status not in df_operador_abs.columns:
+                df_operador_abs[status] = 0
+        df_operador_abs = df_operador_abs[status_esperados]
+
+        fig4 = go.Figure()
+        for status in status_esperados:
+            fig4.add_trace(go.Bar(
+                x=df_operador_abs.index,
+                y=df_operador_abs[status],
+                name=status,
+                orientation='v',
+                text=df_operador_abs[status],
+                textposition='auto',
+                marker_color=CORES_STATUS[status],
+                marker_pattern_shape='/' if status == 'Atrasada' else ''
+            ))
+
+        fig4.update_layout(
+            title='Operadores x Status das Atividades (Absoluto)',
+            barmode='stack',
+            legend=dict(orientation='h', y=-0.5, x=0.5, xanchor='center')
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+    with cole3:
+        st.subheader("Detalhamento por Cliente")
+
+        tabela_cliente = pd.crosstab(
+            df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Cliente"],
+            df_filtrado[df_filtrado["Equipe"] == equipe_atual]["Status"]
+        )
+
+        for status in status_esperados:
+            if status not in tabela_cliente.columns:
+                tabela_cliente[status] = 0
+        tabela_cliente = tabela_cliente[status_esperados]
+        tabela_cliente = tabela_cliente.sort_values(by='Atrasada', ascending=False)
+
+        # Aplica o CSS e exibe a tabela com altura igual às outras colunas
+        st.markdown('<div class="dataframe-container">', unsafe_allow_html=True)
+        st.dataframe(tabela_cliente.style.format(precision=0))
+        st.markdown('</div>', unsafe_allow_html=True)
+
 
 st.rerun()
